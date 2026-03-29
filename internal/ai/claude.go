@@ -18,14 +18,27 @@ const (
 	anthropicVersion    = "2023-06-01"
 )
 
+// ContentBlock represents a single block in a multi-block message (text, tool_use, or tool_result).
+type ContentBlock struct {
+	Type      string                 `json:"type"`                  // "text", "tool_use", "tool_result"
+	Text      string                 `json:"text,omitempty"`        // for type="text"
+	ID        string                 `json:"id,omitempty"`          // for type="tool_use"
+	Name      string                 `json:"name,omitempty"`        // for type="tool_use"
+	Input     map[string]interface{} `json:"input,omitempty"`       // for type="tool_use"
+	ToolUseID string                 `json:"tool_use_id,omitempty"` // for type="tool_result"
+	Content   string                 `json:"content,omitempty"`     // for type="tool_result"
+}
+
 // ChatMessage represents a single message in a conversation.
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role          string         `json:"role"`
+	Content       string         `json:"content,omitempty"`
+	ContentBlocks []ContentBlock `json:"content_blocks,omitempty"`
 }
 
 // ToolCall represents a tool invocation requested by the model.
 type ToolCall struct {
+	ID    string                 `json:"id"`
 	Name  string                 `json:"name"`
 	Input map[string]interface{} `json:"input"`
 }
@@ -75,8 +88,8 @@ type apiContentBlock struct {
 }
 
 type apiMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"`
 }
 
 type apiToolInputSchema struct {
@@ -324,7 +337,11 @@ func (c *ClaudeClient) Chat(messages []ChatMessage, taskContext string) (string,
 
 	apiMsgs := make([]apiMessage, len(messages))
 	for i, m := range messages {
-		apiMsgs[i] = apiMessage{Role: m.Role, Content: m.Content}
+		if len(m.ContentBlocks) > 0 {
+			apiMsgs[i] = apiMessage{Role: m.Role, Content: m.ContentBlocks}
+		} else {
+			apiMsgs[i] = apiMessage{Role: m.Role, Content: m.Content}
+		}
 	}
 
 	req := apiRequest{
@@ -355,6 +372,7 @@ func (c *ClaudeClient) Chat(messages []ChatMessage, taskContext string) (string,
 				}
 			}
 			toolCalls = append(toolCalls, ToolCall{
+				ID:    block.ID,
 				Name:  block.Name,
 				Input: input,
 			})
@@ -380,7 +398,11 @@ func (c *ClaudeClient) ChatStream(messages []ChatMessage, taskContext string, on
 
 	apiMsgs := make([]apiMessage, len(messages))
 	for i, m := range messages {
-		apiMsgs[i] = apiMessage{Role: m.Role, Content: m.Content}
+		if len(m.ContentBlocks) > 0 {
+			apiMsgs[i] = apiMessage{Role: m.Role, Content: m.ContentBlocks}
+		} else {
+			apiMsgs[i] = apiMessage{Role: m.Role, Content: m.Content}
+		}
 	}
 
 	req := apiStreamRequest{
@@ -496,6 +518,7 @@ func (c *ClaudeClient) parseSSEStream(body io.Reader, onEvent func(StreamEvent))
 					json.Unmarshal([]byte(toolInputJSON), &input)
 				}
 				toolCalls = append(toolCalls, ToolCall{
+					ID:    currentToolID,
 					Name:  currentToolName,
 					Input: input,
 				})

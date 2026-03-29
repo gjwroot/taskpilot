@@ -50,10 +50,10 @@ export function useAIStream() {
       const finalContent = contentRef.current
       const finalToolResults = toolResultsRef.current
       setStatus('idle')
-      if (finalContent) {
+      if (finalContent || finalToolResults.length > 0) {
         addChatMessage({
           role: 'assistant',
-          content: finalContent,
+          content: finalContent || '',
           toolResults: finalToolResults.length > 0 ? [...finalToolResults] : undefined,
           timestamp: Date.now(),
         })

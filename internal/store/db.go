@@ -47,6 +47,7 @@ func (db *DB) migrate() error {
 			status      TEXT NOT NULL DEFAULT 'todo',
 			priority    INTEGER NOT NULL DEFAULT 2,
 			due_date    TEXT NOT NULL DEFAULT '',
+			tags        TEXT NOT NULL DEFAULT '',
 			created_at  TEXT NOT NULL,
 			updated_at  TEXT NOT NULL
 		);
@@ -55,6 +56,25 @@ func (db *DB) migrate() error {
 			key   TEXT PRIMARY KEY,
 			value TEXT NOT NULL DEFAULT ''
 		);
+
+		CREATE TABLE IF NOT EXISTS chat_messages (
+			id          TEXT PRIMARY KEY,
+			project_id  TEXT NOT NULL DEFAULT '',
+			role        TEXT NOT NULL,
+			content     TEXT NOT NULL,
+			tool_results TEXT NOT NULL DEFAULT '',
+			created_at  TEXT NOT NULL
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_chat_messages_project ON chat_messages(project_id);
+		CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(created_at);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// 为已有的 tasks 表添加 tags 列（忽略"列已存在"错误）
+	db.Exec(`ALTER TABLE tasks ADD COLUMN tags TEXT NOT NULL DEFAULT ''`)
+
+	return nil
 }

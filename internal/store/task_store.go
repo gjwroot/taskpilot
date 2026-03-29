@@ -27,9 +27,9 @@ func (s *TaskStore) Create(t model.Task) error {
 	t.UpdatedAt = now
 
 	_, err := s.db.Exec(
-		`INSERT INTO tasks (id, project_id, title, description, status, priority, due_date, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.ID, t.ProjectID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.CreatedAt, t.UpdatedAt,
+		`INSERT INTO tasks (id, project_id, title, description, status, priority, due_date, tags, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.ID, t.ProjectID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.Tags, t.CreatedAt, t.UpdatedAt,
 	)
 	return err
 }
@@ -37,8 +37,8 @@ func (s *TaskStore) Create(t model.Task) error {
 func (s *TaskStore) Update(t model.Task) error {
 	t.UpdatedAt = time.Now().Format(time.RFC3339)
 	_, err := s.db.Exec(
-		`UPDATE tasks SET project_id=?, title=?, description=?, status=?, priority=?, due_date=?, updated_at=? WHERE id=?`,
-		t.ProjectID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.UpdatedAt, t.ID,
+		`UPDATE tasks SET project_id=?, title=?, description=?, status=?, priority=?, due_date=?, tags=?, updated_at=? WHERE id=?`,
+		t.ProjectID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, t.Tags, t.UpdatedAt, t.ID,
 	)
 	return err
 }
@@ -50,7 +50,7 @@ func (s *TaskStore) Delete(id string) error {
 
 func (s *TaskStore) GetByID(id string) (*model.Task, error) {
 	row := s.db.QueryRow(
-		`SELECT id, project_id, title, description, status, priority, due_date, created_at, updated_at FROM tasks WHERE id=?`, id,
+		`SELECT id, project_id, title, description, status, priority, due_date, tags, created_at, updated_at FROM tasks WHERE id=?`, id,
 	)
 	t, err := scanTask(row)
 	if err == sql.ErrNoRows {
@@ -61,7 +61,7 @@ func (s *TaskStore) GetByID(id string) (*model.Task, error) {
 
 func (s *TaskStore) ListByProject(projectID string) ([]model.Task, error) {
 	rows, err := s.db.Query(
-		`SELECT id, project_id, title, description, status, priority, due_date, created_at, updated_at
+		`SELECT id, project_id, title, description, status, priority, due_date, tags, created_at, updated_at
 		 FROM tasks WHERE project_id=? ORDER BY priority ASC, created_at ASC`,
 		projectID,
 	)
@@ -74,7 +74,7 @@ func (s *TaskStore) ListByProject(projectID string) ([]model.Task, error) {
 
 func (s *TaskStore) ListByStatus(status string) ([]model.Task, error) {
 	rows, err := s.db.Query(
-		`SELECT id, project_id, title, description, status, priority, due_date, created_at, updated_at
+		`SELECT id, project_id, title, description, status, priority, due_date, tags, created_at, updated_at
 		 FROM tasks WHERE status=? ORDER BY priority ASC, created_at ASC`,
 		status,
 	)
@@ -89,7 +89,7 @@ func (s *TaskStore) ListByStatus(status string) ([]model.Task, error) {
 func (s *TaskStore) ListTodayTasks() ([]model.Task, error) {
 	today := time.Now().Format("2006-01-02")
 	rows, err := s.db.Query(
-		`SELECT id, project_id, title, description, status, priority, due_date, created_at, updated_at
+		`SELECT id, project_id, title, description, status, priority, due_date, tags, created_at, updated_at
 		 FROM tasks
 		 WHERE status = 'doing' OR (due_date != '' AND due_date LIKE ?)
 		 ORDER BY priority ASC, created_at ASC`,
@@ -104,7 +104,7 @@ func (s *TaskStore) ListTodayTasks() ([]model.Task, error) {
 
 func (s *TaskStore) ListAll() ([]model.Task, error) {
 	rows, err := s.db.Query(
-		`SELECT id, project_id, title, description, status, priority, due_date, created_at, updated_at
+		`SELECT id, project_id, title, description, status, priority, due_date, tags, created_at, updated_at
 		 FROM tasks ORDER BY priority ASC, created_at ASC`,
 	)
 	if err != nil {
@@ -116,7 +116,7 @@ func (s *TaskStore) ListAll() ([]model.Task, error) {
 
 func scanTask(s scanner) (*model.Task, error) {
 	var t model.Task
-	err := s.Scan(&t.ID, &t.ProjectID, &t.Title, &t.Description, &t.Status, &t.Priority, &t.DueDate, &t.CreatedAt, &t.UpdatedAt)
+	err := s.Scan(&t.ID, &t.ProjectID, &t.Title, &t.Description, &t.Status, &t.Priority, &t.DueDate, &t.Tags, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}

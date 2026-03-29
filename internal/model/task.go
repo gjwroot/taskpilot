@@ -10,4 +10,5 @@ type Task struct {
 	DueDate     string `json:"dueDate"`  // ISO date string, empty if not set
 	CreatedAt   string `json:"createdAt"`
 	UpdatedAt   string `json:"updatedAt"`
+	Tags        string `json:"tags"`      // 逗号分隔标签
 }

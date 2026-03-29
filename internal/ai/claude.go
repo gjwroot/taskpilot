@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -101,6 +102,64 @@ type apiRequest struct {
 type apiResponse struct {
 	Content    []apiContentBlock `json:"content"`
 	StopReason string            `json:"stop_reason"`
+}
+
+// ---------- streaming types ----------
+
+type StreamEventType string
+
+const (
+	StreamEventStart    StreamEventType = "start"
+	StreamEventChunk    StreamEventType = "chunk"
+	StreamEventToolCall StreamEventType = "tool_call"
+	StreamEventEnd      StreamEventType = "end"
+	StreamEventError    StreamEventType = "error"
+)
+
+type StreamEvent struct {
+	Type      StreamEventType        `json:"type"`
+	MessageID string                 `json:"messageId"`
+	Text      string                 `json:"text,omitempty"`
+	ToolName  string                 `json:"toolName,omitempty"`
+	ToolID    string                 `json:"toolId,omitempty"`
+	ToolInput map[string]interface{} `json:"toolInput,omitempty"`
+}
+
+type apiStreamRequest struct {
+	Model     string       `json:"model"`
+	MaxTokens int          `json:"max_tokens"`
+	System    string       `json:"system,omitempty"`
+	Messages  []apiMessage `json:"messages"`
+	Tools     []apiTool    `json:"tools,omitempty"`
+	Stream    bool         `json:"stream"`
+}
+
+type sseMessageStart struct {
+	Type    string `json:"type"`
+	Message struct {
+		ID string `json:"id"`
+	} `json:"message"`
+}
+
+type sseContentBlockStart struct {
+	Type         string `json:"type"`
+	Index        int    `json:"index"`
+	ContentBlock struct {
+		Type string `json:"type"`
+		ID   string `json:"id,omitempty"`
+		Name string `json:"name,omitempty"`
+		Text string `json:"text,omitempty"`
+	} `json:"content_block"`
+}
+
+type sseContentBlockDelta struct {
+	Type  string `json:"type"`
+	Index int    `json:"index"`
+	Delta struct {
+		Type        string `json:"type"`
+		Text        string `json:"text,omitempty"`
+		PartialJSON string `json:"partial_json,omitempty"`
+	} `json:"delta"`
 }
 
 // ---------- tool definitions ----------
@@ -303,6 +362,166 @@ func (c *ClaudeClient) Chat(messages []ChatMessage, taskContext string) (string,
 	}
 
 	return textContent, toolCalls, nil
+}
+
+// ChatStream sends a conversation to Claude using SSE streaming and calls onEvent for each event.
+func (c *ClaudeClient) ChatStream(messages []ChatMessage, taskContext string, onEvent func(StreamEvent)) (string, []ToolCall, error) {
+	systemPrompt := `你是 TaskPilot AI 助手，帮助用户管理项目和任务。用户的任务数据会作为上下文提供。你可以使用工具来创建、更新、查询、删除任务。请用中文回复。
+
+当用户的消息看起来是在描述一个任务时（如"明天下午3点前完成设计稿"），你应该：
+1. 提取任务标题、截止日期（转为 ISO 8601 格式 YYYY-MM-DD）、优先级（P0-P3 对应 0-3）、所属项目
+2. 如果信息不完整，使用合理默认值（优先级默认 1，项目使用上下文中最近活跃的项目）
+3. 调用 create_task 工具创建任务
+4. 回复确认创建结果，包含解析出的各字段`
+
+	if taskContext != "" {
+		systemPrompt += "\n\n当前任务数据（JSON格式）：\n" + taskContext
+	}
+
+	apiMsgs := make([]apiMessage, len(messages))
+	for i, m := range messages {
+		apiMsgs[i] = apiMessage{Role: m.Role, Content: m.Content}
+	}
+
+	req := apiStreamRequest{
+		Model:     c.model,
+		MaxTokens: 4096,
+		System:    systemPrompt,
+		Messages:  apiMsgs,
+		Tools:     chatTools(),
+		Stream:    true,
+	}
+
+	logger.Log.Info("AI streaming request", "model", req.Model, "url", c.baseURL, "messages", len(req.Messages))
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return "", nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequest(http.MethodPost, c.baseURL, bytes.NewReader(body))
+	if err != nil {
+		return "", nil, fmt.Errorf("create http request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-api-key", c.apiKey)
+	httpReq.Header.Set("anthropic-version", anthropicVersion)
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return "", nil, fmt.Errorf("http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		logger.Log.Error("AI streaming error", "status", resp.StatusCode, "body", string(respBody))
+		return "", nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return c.parseSSEStream(resp.Body, onEvent)
+}
+
+func (c *ClaudeClient) parseSSEStream(body io.Reader, onEvent func(StreamEvent)) (string, []ToolCall, error) {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var (
+		fullText         string
+		toolCalls        []ToolCall
+		messageID        string
+		currentBlockType string
+		currentToolID    string
+		currentToolName  string
+		toolInputJSON    string
+	)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var raw map[string]interface{}
+		if err := json.Unmarshal([]byte(data), &raw); err != nil {
+			continue
+		}
+
+		eventType, _ := raw["type"].(string)
+
+		switch eventType {
+		case "message_start":
+			var evt sseMessageStart
+			json.Unmarshal([]byte(data), &evt)
+			messageID = evt.Message.ID
+			onEvent(StreamEvent{
+				Type:      StreamEventStart,
+				MessageID: messageID,
+			})
+
+		case "content_block_start":
+			var evt sseContentBlockStart
+			json.Unmarshal([]byte(data), &evt)
+			currentBlockType = evt.ContentBlock.Type
+			if currentBlockType == "tool_use" {
+				currentToolID = evt.ContentBlock.ID
+				currentToolName = evt.ContentBlock.Name
+				toolInputJSON = ""
+			}
+
+		case "content_block_delta":
+			var evt sseContentBlockDelta
+			json.Unmarshal([]byte(data), &evt)
+
+			if evt.Delta.Type == "text_delta" {
+				fullText += evt.Delta.Text
+				onEvent(StreamEvent{
+					Type:      StreamEventChunk,
+					MessageID: messageID,
+					Text:      evt.Delta.Text,
+				})
+			} else if evt.Delta.Type == "input_json_delta" {
+				toolInputJSON += evt.Delta.PartialJSON
+			}
+
+		case "content_block_stop":
+			if currentBlockType == "tool_use" {
+				var input map[string]interface{}
+				if toolInputJSON != "" {
+					json.Unmarshal([]byte(toolInputJSON), &input)
+				}
+				toolCalls = append(toolCalls, ToolCall{
+					Name:  currentToolName,
+					Input: input,
+				})
+				onEvent(StreamEvent{
+					Type:      StreamEventToolCall,
+					MessageID: messageID,
+					ToolName:  currentToolName,
+					ToolID:    currentToolID,
+					ToolInput: input,
+				})
+			}
+			currentBlockType = ""
+
+		case "message_stop":
+			onEvent(StreamEvent{
+				Type:      StreamEventEnd,
+				MessageID: messageID,
+			})
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fullText, toolCalls, fmt.Errorf("read SSE stream: %w", err)
+	}
+
+	return fullText, toolCalls, nil
 }
 
 // GenerateDailySummary generates a Markdown daily summary from a list of tasks.

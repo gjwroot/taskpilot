@@ -159,6 +159,21 @@ export default function TaskForm({ task, onClose, onSave }: TaskFormProps) {
                 className="w-full px-3.5 py-2.5 text-sm border border-stone-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400 transition-all"
               />
             </div>
+
+            <div>
+              <label className="block text-xs font-medium text-stone-600 mb-1.5">标签 <span className="text-stone-400 font-normal">（AI 自动生成）</span></label>
+              <div className="flex flex-wrap gap-1.5">
+                {(task?.tags || '').split(',').filter(Boolean).map((tag, i) => (
+                  <span
+                    key={i}
+                    className="text-xs px-2 py-1 rounded-full bg-violet-100/80 text-violet-600 font-medium"
+                  >
+                    {tag.trim()}
+                  </span>
+                ))}
+                {!(task?.tags) && <span className="text-xs text-stone-400">保存后 AI 将自动生成标签</span>}
+              </div>
+            </div>
           </div>
 
           <div className="flex gap-3 px-6 py-4 border-t border-stone-100">

@@ -110,7 +110,7 @@ export default function TaskItem({ task, onEdit }: TaskItemProps) {
           <p className={`text-sm font-medium truncate ${task.status === 'done' ? 'line-through text-stone-400' : 'text-stone-800'}`}>
             {task.title}
           </p>
-          <div className="flex items-center gap-2 mt-0.5">
+          <div className="flex items-center gap-2 mt-0.5 flex-wrap">
             {project && (
               <span className="text-xs" style={{ color: project.color }}>{project.name}</span>
             )}
@@ -120,6 +120,14 @@ export default function TaskItem({ task, onEdit }: TaskItemProps) {
                 {dueDateLabel}
               </span>
             )}
+            {task.tags && task.tags.split(',').filter(Boolean).map((tag, i) => (
+              <span
+                key={i}
+                className="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-100/80 text-violet-600 font-medium"
+              >
+                {tag.trim()}
+              </span>
+            ))}
           </div>
         </div>
 

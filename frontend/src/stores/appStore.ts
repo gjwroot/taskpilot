@@ -17,6 +17,7 @@ export interface Task {
   status: string  // todo, doing, done
   priority: number // 0-3
   dueDate: string
+  tags: string       // 逗号分隔标签
   createdAt: string
   updatedAt: string
 }

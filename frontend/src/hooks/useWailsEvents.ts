@@ -22,9 +22,15 @@ export function useWailsEvents() {
       setTasks(tasks || [])
     })
 
+    const unsubTags = Events.On('task:tags:updated', async () => {
+      const tasks = await getAllTasks()
+      setTasks(tasks || [])
+    })
+
     return () => {
       if (unsubProject) unsubProject()
       if (unsubTask) unsubTask()
+      if (unsubTags) unsubTags()
     }
   }, [setProjects, setTasks])
 }

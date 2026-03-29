@@ -38,6 +38,15 @@ func main() {
 	// Initialize AI client from stored config.
 	aiSvc.ReloadClient()
 
+	// Wire auto-tagging via closure to avoid circular dependencies.
+	taskSvc.AutoTagFunc = func(title, description string, existingTags []string) ([]string, error) {
+		client := aiSvc.GetAIClient()
+		if client == nil {
+			return nil, nil
+		}
+		return client.AutoTagTask(title, description, existingTags)
+	}
+
 	// Create the application.
 	app := application.New(application.Options{
 		Name:        "TaskPilot",

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/wailsapp/wails/v3/pkg/application"
 	"taskpilot/internal/ai"
 	"taskpilot/internal/core"
 	"taskpilot/internal/logger"
@@ -39,6 +40,153 @@ func (s *AIService) ReloadClient() {
 		s.aiClient = ai.NewClaudeClient(apiKey, baseURL, modelName)
 		logger.Log.Info("AI client reloaded", "model", modelName, "baseURL", baseURL)
 	}
+}
+
+// GetAIClient returns the underlying Claude client.
+func (s *AIService) GetAIClient() *ai.ClaudeClient {
+	return s.aiClient
+}
+
+// StreamChatWithAI starts a streaming chat session and emits Wails events for each chunk.
+func (s *AIService) StreamChatWithAI(message string, projectID string) error {
+	if s.aiClient == nil {
+		return fmt.Errorf("AI 未配置 – 请先在设置中配置 API Key")
+	}
+
+	logger.Log.Info("stream chat request", "messageLen", len(message), "projectID", projectID)
+
+	tasks, err := s.Core.TaskStore.ListAll()
+	if err != nil {
+		tasks = []model.Task{}
+	}
+	taskJSON, _ := json.Marshal(tasks)
+
+	s.chatHistory = append(s.chatHistory, ai.ChatMessage{
+		Role:    "user",
+		Content: message,
+	})
+
+	// Persist user message
+	s.Core.ChatStore.Save(projectID, "user", message, "[]")
+
+	app := application.Get()
+	if app == nil {
+		return fmt.Errorf("application not available")
+	}
+
+	go func() {
+		var toolResults []ToolCallResult
+
+		text, toolCalls, err := s.aiClient.ChatStream(s.chatHistory, string(taskJSON), func(evt ai.StreamEvent) {
+			switch evt.Type {
+			case ai.StreamEventStart:
+				app.Event.Emit("ai:stream:start", map[string]string{"messageId": evt.MessageID})
+			case ai.StreamEventChunk:
+				app.Event.Emit("ai:stream:chunk", map[string]string{"messageId": evt.MessageID, "text": evt.Text})
+			case ai.StreamEventToolCall:
+				app.Event.Emit("ai:stream:tool_call", map[string]interface{}{"messageId": evt.MessageID, "name": evt.ToolName, "input": evt.ToolInput})
+			case ai.StreamEventEnd:
+				// Will be emitted after tool processing
+			case ai.StreamEventError:
+				app.Event.Emit("ai:stream:error", map[string]string{"messageId": evt.MessageID, "error": evt.Text})
+			}
+		})
+
+		if err != nil {
+			logger.Log.Error("stream chat failed", "error", err)
+			app.Event.Emit("ai:stream:error", map[string]string{"messageId": "", "error": fmt.Sprintf("AI 对话失败: %v", err)})
+			return
+		}
+
+		for _, tc := range toolCalls {
+			result := s.executeToolCall(tc)
+			toolResults = append(toolResults, result)
+			app.Event.Emit("ai:stream:tool_result", map[string]interface{}{"messageId": "", "name": tc.Name, "result": result, "success": result.Success})
+		}
+
+		s.chatHistory = append(s.chatHistory, ai.ChatMessage{Role: "assistant", Content: text})
+
+		toolResultsJSON := "[]"
+		if len(toolResults) > 0 {
+			b, _ := json.Marshal(toolResults)
+			toolResultsJSON = string(b)
+		}
+		s.Core.ChatStore.Save(projectID, "assistant", text, toolResultsJSON)
+
+		app.Event.Emit("ai:stream:end", map[string]string{"messageId": ""})
+
+		logger.Log.Info("stream chat completed", "textLen", len(text), "toolCalls", len(toolCalls))
+	}()
+
+	return nil
+}
+
+// GetChatHistory retrieves persisted chat messages for a project.
+func (s *AIService) GetChatHistory(projectID string, limit, offset int) ([]map[string]interface{}, error) {
+	msgs, err := s.Core.ChatStore.GetMessages(projectID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	var result []map[string]interface{}
+	for _, m := range msgs {
+		msg := map[string]interface{}{
+			"id":        m.ID,
+			"role":      m.Role,
+			"content":   m.Content,
+			"createdAt": m.CreatedAt,
+		}
+		if m.ToolResults != "" && m.ToolResults != "[]" {
+			var tr []ToolCallResult
+			if json.Unmarshal([]byte(m.ToolResults), &tr) == nil && len(tr) > 0 {
+				msg["toolResults"] = tr
+			}
+		}
+		result = append(result, msg)
+	}
+	return result, nil
+}
+
+// ClearProjectChatHistory clears in-memory and DB chat history for a specific project.
+func (s *AIService) ClearProjectChatHistory(projectID string) error {
+	s.chatHistory = nil
+	return s.Core.ChatStore.DeleteByProject(projectID)
+}
+
+// GetProactiveSuggestions returns AI-generated suggestions for the given project.
+func (s *AIService) GetProactiveSuggestions(projectID string) (string, error) {
+	if s.aiClient == nil {
+		return "", fmt.Errorf("AI 未配置")
+	}
+	logger.Log.Info("getting proactive suggestions", "projectID", projectID)
+
+	var tasks []model.Task
+	var err error
+	if projectID != "" {
+		tasks, err = s.Core.TaskStore.ListByProject(projectID)
+	} else {
+		tasks, err = s.Core.TaskStore.ListAll()
+	}
+	if err != nil {
+		return "", err
+	}
+
+	projectName := "所有项目"
+	if projectID != "" {
+		projects, _ := s.Core.ProjectStore.List()
+		for _, p := range projects {
+			if p.ID == projectID {
+				projectName = p.Name
+				break
+			}
+		}
+	}
+
+	result, err := s.aiClient.GetProactiveSuggestions(tasksToMaps(tasks), projectName)
+	if err != nil {
+		logger.Log.Error("proactive suggestions failed", "error", err)
+		return "", err
+	}
+	return result, nil
 }
 
 func (s *AIService) ChatWithAI(message string) (*ChatResponse, error) {
@@ -295,6 +443,7 @@ func (s *AIService) TestAIConnection() error {
 
 func (s *AIService) ClearChatHistory() {
 	s.chatHistory = nil
+	s.Core.ChatStore.DeleteAll()
 }
 
 func tasksToMaps(tasks []model.Task) []map[string]interface{} {
@@ -304,6 +453,7 @@ func tasksToMaps(tasks []model.Task) []map[string]interface{} {
 			"id": t.ID, "title": t.Title, "status": t.Status,
 			"priority": t.Priority, "dueDate": t.DueDate,
 			"projectId": t.ProjectID, "description": t.Description,
+			"tags": t.Tags,
 		})
 	}
 	return result

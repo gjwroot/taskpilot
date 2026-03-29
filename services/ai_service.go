@@ -75,47 +75,105 @@ func (s *AIService) StreamChatWithAI(message string, projectID string) error {
 	}
 
 	go func() {
-		var toolResults []ToolCallResult
+		var allToolResults []ToolCallResult
+		const maxToolRounds = 5
 
-		text, toolCalls, err := s.aiClient.ChatStream(s.chatHistory, string(taskJSON), func(evt ai.StreamEvent) {
-			switch evt.Type {
-			case ai.StreamEventStart:
-				app.Event.Emit("ai:stream:start", map[string]string{"messageId": evt.MessageID})
-			case ai.StreamEventChunk:
-				app.Event.Emit("ai:stream:chunk", map[string]string{"messageId": evt.MessageID, "text": evt.Text})
-			case ai.StreamEventToolCall:
-				app.Event.Emit("ai:stream:tool_call", map[string]interface{}{"messageId": evt.MessageID, "name": evt.ToolName, "input": evt.ToolInput})
-			case ai.StreamEventEnd:
-				// Will be emitted after tool processing
-			case ai.StreamEventError:
-				app.Event.Emit("ai:stream:error", map[string]string{"messageId": evt.MessageID, "error": evt.Text})
+		for round := 0; round < maxToolRounds; round++ {
+			text, toolCalls, err := s.aiClient.ChatStream(s.chatHistory, string(taskJSON), func(evt ai.StreamEvent) {
+				switch evt.Type {
+				case ai.StreamEventStart:
+					app.Event.Emit("ai:stream:start", map[string]string{"messageId": evt.MessageID})
+				case ai.StreamEventChunk:
+					app.Event.Emit("ai:stream:chunk", map[string]string{"messageId": evt.MessageID, "text": evt.Text})
+				case ai.StreamEventToolCall:
+					app.Event.Emit("ai:stream:tool_call", map[string]interface{}{"messageId": evt.MessageID, "name": evt.ToolName, "input": evt.ToolInput})
+				case ai.StreamEventEnd:
+					// Will be emitted after all rounds complete
+				case ai.StreamEventError:
+					app.Event.Emit("ai:stream:error", map[string]string{"messageId": evt.MessageID, "error": evt.Text})
+				}
+			})
+
+			if err != nil {
+				logger.Log.Error("stream chat failed", "error", err)
+				app.Event.Emit("ai:stream:error", map[string]string{"messageId": "", "error": fmt.Sprintf("AI 对话失败: %v", err)})
+				return
 			}
-		})
 
-		if err != nil {
-			logger.Log.Error("stream chat failed", "error", err)
-			app.Event.Emit("ai:stream:error", map[string]string{"messageId": "", "error": fmt.Sprintf("AI 对话失败: %v", err)})
-			return
+			// 如果没有工具调用，这是最终回复
+			if len(toolCalls) == 0 {
+				s.chatHistory = append(s.chatHistory, ai.ChatMessage{Role: "assistant", Content: text})
+				break
+			}
+
+			// 构建 assistant 消息的 content blocks（text + tool_use blocks）
+			var assistantBlocks []ai.ContentBlock
+			if text != "" {
+				assistantBlocks = append(assistantBlocks, ai.ContentBlock{Type: "text", Text: text})
+			}
+			for _, tc := range toolCalls {
+				assistantBlocks = append(assistantBlocks, ai.ContentBlock{
+					Type:  "tool_use",
+					ID:    tc.ID,
+					Name:  tc.Name,
+					Input: tc.Input,
+				})
+			}
+			s.chatHistory = append(s.chatHistory, ai.ChatMessage{
+				Role:          "assistant",
+				ContentBlocks: assistantBlocks,
+			})
+
+			// 执行工具调用并构建 tool_result blocks
+			var toolResultBlocks []ai.ContentBlock
+			for _, tc := range toolCalls {
+				result := s.executeToolCall(tc)
+				allToolResults = append(allToolResults, result)
+				app.Event.Emit("ai:stream:tool_result", map[string]interface{}{
+					"messageId": "", "name": tc.Name, "result": result, "success": result.Success,
+				})
+
+				resultJSON, _ := json.Marshal(result)
+				toolResultBlocks = append(toolResultBlocks, ai.ContentBlock{
+					Type:      "tool_result",
+					ToolUseID: tc.ID,
+					Content:   string(resultJSON),
+				})
+			}
+			s.chatHistory = append(s.chatHistory, ai.ChatMessage{
+				Role:          "user",
+				ContentBlocks: toolResultBlocks,
+			})
+
+			logger.Log.Info("tool use round completed", "round", round+1, "toolCalls", len(toolCalls))
 		}
 
-		for _, tc := range toolCalls {
-			result := s.executeToolCall(tc)
-			toolResults = append(toolResults, result)
-			app.Event.Emit("ai:stream:tool_result", map[string]interface{}{"messageId": "", "name": tc.Name, "result": result, "success": result.Success})
+		// 保存最终的 assistant 文本回复
+		finalText := ""
+		if len(s.chatHistory) > 0 {
+			last := s.chatHistory[len(s.chatHistory)-1]
+			if last.Role == "assistant" {
+				finalText = last.Content
+				if finalText == "" {
+					for _, b := range last.ContentBlocks {
+						if b.Type == "text" {
+							finalText += b.Text
+						}
+					}
+				}
+			}
 		}
-
-		s.chatHistory = append(s.chatHistory, ai.ChatMessage{Role: "assistant", Content: text})
 
 		toolResultsJSON := "[]"
-		if len(toolResults) > 0 {
-			b, _ := json.Marshal(toolResults)
+		if len(allToolResults) > 0 {
+			b, _ := json.Marshal(allToolResults)
 			toolResultsJSON = string(b)
 		}
-		s.Core.ChatStore.Save(projectID, "assistant", text, toolResultsJSON)
+		s.Core.ChatStore.Save(projectID, "assistant", finalText, toolResultsJSON)
 
 		app.Event.Emit("ai:stream:end", map[string]string{"messageId": ""})
 
-		logger.Log.Info("stream chat completed", "textLen", len(text), "toolCalls", len(toolCalls))
+		logger.Log.Info("stream chat completed", "textLen", len(finalText), "toolCalls", len(allToolResults))
 	}()
 
 	return nil
@@ -325,7 +383,12 @@ func (s *AIService) executeToolCall(tc ai.ToolCall) ToolCallResult {
 		if err != nil {
 			result = ToolCallResult{Action: tc.Name, Success: false, Message: err.Error()}
 		} else {
-			result = ToolCallResult{Action: tc.Name, Success: true, Message: fmt.Sprintf("找到 %d 个任务", len(tasks))}
+			summary := fmt.Sprintf("找到 %d 个任务", len(tasks))
+			if len(tasks) > 0 {
+				taskData, _ := json.Marshal(tasksToMaps(tasks))
+				summary += "\n" + string(taskData)
+			}
+			result = ToolCallResult{Action: tc.Name, Success: true, Message: summary}
 		}
 
 	default:

@@ -9,79 +9,10 @@ const FiTarget = _FiTarget as unknown as FiIcon
 const FiBarChart2 = _FiBarChart2 as unknown as FiIcon
 const FiPlusCircle = _FiPlusCircle as unknown as FiIcon
 import { useAppStore } from '../stores/appStore'
-import { chatWithAI, clearChatHistory as clearChatHistoryAPI } from '../hooks/useWails'
-
-function renderMarkdown(text: string): JSX.Element {
-  const lines = text.split('\n')
-  const elements: JSX.Element[] = []
-  let i = 0
-
-  while (i < lines.length) {
-    const line = lines[i]
-    if (line.startsWith('```')) {
-      const codeLines: string[] = []
-      i++
-      while (i < lines.length && !lines[i].startsWith('```')) {
-        codeLines.push(lines[i])
-        i++
-      }
-      elements.push(
-        <pre key={i} className="bg-stone-100 rounded-lg p-2.5 my-1.5 text-xs overflow-x-auto whitespace-pre-wrap font-mono border border-stone-200/50">
-          <code>{codeLines.join('\n')}</code>
-        </pre>
-      )
-      i++
-      continue
-    }
-    if (line.match(/^[-*] /)) {
-      elements.push(
-        <li key={i} className="ml-4 list-disc text-stone-600">
-          {renderInline(line.slice(2))}
-        </li>
-      )
-      i++
-      continue
-    }
-    if (line.trim() === '') {
-      elements.push(<div key={i} className="h-1" />)
-      i++
-      continue
-    }
-    elements.push(
-      <p key={i} className="leading-relaxed">
-        {renderInline(line)}
-      </p>
-    )
-    i++
-  }
-  return <>{elements}</>
-}
-
-function renderInline(text: string): JSX.Element {
-  const parts: JSX.Element[] = []
-  const regex = /(\*\*(.+?)\*\*|`([^`]+)`)/g
-  let lastIndex = 0
-  let match: RegExpExecArray | null
-  while ((match = regex.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      parts.push(<span key={lastIndex}>{text.slice(lastIndex, match.index)}</span>)
-    }
-    if (match[0].startsWith('**')) {
-      parts.push(<strong key={match.index} className="font-semibold text-stone-800">{match[2]}</strong>)
-    } else {
-      parts.push(
-        <code key={match.index} className="bg-stone-100 rounded px-1 py-0.5 text-xs font-mono text-indigo-600">
-          {match[3]}
-        </code>
-      )
-    }
-    lastIndex = match.index + match[0].length
-  }
-  if (lastIndex < text.length) {
-    parts.push(<span key={lastIndex}>{text.slice(lastIndex)}</span>)
-  }
-  return <>{parts}</>
-}
+import { clearChatHistory as clearChatHistoryAPI } from '../hooks/useWails'
+import { useAIStream } from '../hooks/useAIStream'
+import MarkdownRenderer from './MarkdownRenderer'
+import ProactiveSuggestions from './ProactiveSuggestions'
 
 function LoadingDots() {
   return (
@@ -101,9 +32,10 @@ const QUICK_PROMPTS: { icon: FiIcon; label: string; text: string }[] = [
 ]
 
 export default function ChatPanel({ standalone = false }: { standalone?: boolean }) {
-  const { chatMessages, addChatMessage, clearChatMessages, toggleChatPanel } = useAppStore()
+  const { chatMessages, clearChatMessages, toggleChatPanel } = useAppStore()
+  const { status, streamingContent, toolResults, sendMessage } = useAIStream()
+  const isStreaming = status === 'streaming' || status === 'tool_calling'
   const [input, setInput] = useState('')
-  const [loading, setLoading] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -111,7 +43,7 @@ export default function ChatPanel({ standalone = false }: { standalone?: boolean
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [chatMessages, loading])
+  }, [chatMessages, isStreaming, streamingContent])
 
   useEffect(() => {
     return () => {
@@ -144,29 +76,10 @@ export default function ChatPanel({ standalone = false }: { standalone?: boolean
 
   const handleSend = async (message: string) => {
     const trimmed = message.trim()
-    if (!trimmed || loading) return
+    if (!trimmed || isStreaming) return
     setInput('')
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
-    addChatMessage({ role: 'user', content: trimmed, timestamp: Date.now() })
-    setLoading(true)
-    try {
-      const response = await chatWithAI(trimmed)
-      addChatMessage({
-        role: 'assistant',
-        content: response.text,
-        toolResults: response.toolCalls,
-        timestamp: Date.now(),
-      })
-    } catch (_err) {
-      addChatMessage({
-        role: 'assistant',
-        content: '抱歉，AI 服务出错了。请检查 API Key 设置。',
-        timestamp: Date.now(),
-        isError: true,
-      })
-    } finally {
-      setLoading(false)
-    }
+    await sendMessage(trimmed)
   }
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -185,6 +98,12 @@ export default function ChatPanel({ standalone = false }: { standalone?: boolean
             <Bot size={14} className="text-indigo-500" />
           </div>
           <span className="font-semibold text-stone-800 text-sm">AI 助手</span>
+          {status === 'tool_calling' && (
+            <span className="text-xs text-amber-500 animate-pulse">执行中...</span>
+          )}
+          {status === 'streaming' && (
+            <span className="text-xs text-indigo-400 animate-pulse">思考中...</span>
+          )}
         </div>
         <div className="flex items-center gap-0.5">
           <button
@@ -213,7 +132,7 @@ export default function ChatPanel({ standalone = false }: { standalone?: boolean
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
-        {chatMessages.length === 0 && !loading ? (
+        {chatMessages.length === 0 && !isStreaming ? (
           <div className="flex flex-col gap-3">
             <div className="flex flex-col items-center gap-2 py-8 text-stone-400">
               <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-50 to-purple-50 flex items-center justify-center">
@@ -221,6 +140,7 @@ export default function ChatPanel({ standalone = false }: { standalone?: boolean
               </div>
               <p className="text-sm mt-1">有什么可以帮你的吗？</p>
             </div>
+            <ProactiveSuggestions onSend={handleSend} />
             <div className="flex flex-col gap-2">
               {QUICK_PROMPTS.map((p, idx) => (
                 <motion.button
@@ -269,7 +189,9 @@ export default function ChatPanel({ standalone = false }: { standalone?: boolean
                           <AlertCircle size={13} className="flex-shrink-0 mt-0.5" />
                           <span>{msg.content}</span>
                         </div>
-                      ) : renderMarkdown(msg.content)
+                      ) : (
+                        <MarkdownRenderer content={msg.content} isStreaming={false} />
+                      )
                     ) : msg.content}
                   </div>
                   {msg.toolResults && msg.toolResults.length > 0 && (
@@ -300,13 +222,34 @@ export default function ChatPanel({ standalone = false }: { standalone?: boolean
                 )}
               </motion.div>
             ))}
-            {loading && (
+            {isStreaming && (
               <div className="flex gap-2 justify-start">
                 <div className="flex-shrink-0 w-6 h-6 rounded-lg bg-indigo-50 flex items-center justify-center mt-0.5">
                   <Bot size={12} className="text-indigo-500" />
                 </div>
-                <div className="bg-stone-100/80 px-3 py-2 rounded-2xl rounded-bl-md">
-                  <LoadingDots />
+                <div className="max-w-[78%] flex flex-col gap-1.5">
+                  <div className="bg-stone-100/80 px-3 py-2 rounded-2xl rounded-bl-md text-[13px] text-stone-700">
+                    {streamingContent ? (
+                      <MarkdownRenderer content={streamingContent} isStreaming={true} />
+                    ) : (
+                      <LoadingDots />
+                    )}
+                  </div>
+                  {toolResults.length > 0 && (
+                    <div className="flex flex-col gap-1">
+                      {toolResults.map((tr, ti) => (
+                        <div key={ti} className={`flex items-start gap-1.5 px-2.5 py-1.5 rounded-lg text-xs border ${
+                          tr.success ? 'border-emerald-200/60 bg-emerald-50/50 text-emerald-700' : 'border-red-200/60 bg-red-50/50 text-red-700'
+                        }`}>
+                          <span className="mt-0.5 flex-shrink-0">{tr.success ? '✓' : '✗'}</span>
+                          <div>
+                            <span className="font-medium">{tr.action}</span>
+                            {tr.message && <span className="ml-1 opacity-70">— {tr.message}</span>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -323,19 +266,19 @@ export default function ChatPanel({ standalone = false }: { standalone?: boolean
             value={input}
             onChange={handleInputChange}
             onKeyDown={handleKeyDown}
-            disabled={loading}
+            disabled={isStreaming}
             placeholder="输入消息… (Enter 发送)"
             rows={1}
             className="flex-1 bg-transparent resize-none outline-none text-sm text-stone-800 placeholder-stone-400 leading-6 max-h-24 disabled:opacity-50"
           />
           <motion.button
-            whileHover={!loading ? { scale: 1.05 } : {}}
-            whileTap={!loading ? { scale: 0.95 } : {}}
+            whileHover={!isStreaming ? { scale: 1.05 } : {}}
+            whileTap={!isStreaming ? { scale: 0.95 } : {}}
             onClick={() => handleSend(input)}
-            disabled={loading || !input.trim()}
+            disabled={isStreaming || !input.trim()}
             className="flex-shrink-0 p-1.5 rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
           >
-            {loading ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />}
+            {isStreaming ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />}
           </motion.button>
         </div>
         <p className="text-[10px] text-stone-400 mt-1.5 text-center tracking-wide">Powered by Claude AI</p>

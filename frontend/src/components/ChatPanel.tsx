@@ -100,7 +100,7 @@ const QUICK_PROMPTS: { icon: FiIcon; label: string; text: string }[] = [
   { icon: FiPlusCircle, label: '创建一个新任务', text: '创建一个新任务' },
 ]
 
-export default function ChatPanel() {
+export default function ChatPanel({ standalone = false }: { standalone?: boolean }) {
   const { chatMessages, addChatMessage, clearChatMessages, toggleChatPanel } = useAppStore()
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -169,13 +169,15 @@ export default function ChatPanel() {
           >
             <Trash2 size={14} />
           </button>
-          <button
-            onClick={toggleChatPanel}
-            className="p-1.5 rounded-lg hover:bg-stone-100 text-stone-400 hover:text-stone-600 transition-colors"
-            title="关闭"
-          >
-            <X size={14} />
-          </button>
+          {!standalone && (
+            <button
+              onClick={toggleChatPanel}
+              className="p-1.5 rounded-lg hover:bg-stone-100 text-stone-400 hover:text-stone-600 transition-colors"
+              title="关闭"
+            >
+              <X size={14} />
+            </button>
+          )}
         </div>
       </div>
 

@@ -1,22 +1,50 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import './style.css'
 import { useAppStore } from './stores/appStore'
 import { getProjects, getAllTasks } from './hooks/useWails'
+import { useWailsEvents } from './hooks/useWailsEvents'
 import Sidebar from './components/Sidebar'
 import TaskList from './components/TaskList'
 import TodayView from './components/TodayView'
 import SettingsView from './components/SettingsView'
 import ChatPanel from './components/ChatPanel'
+import QuickAddView from './views/QuickAddView'
 
 function App() {
   const { currentView, showChatPanel, setProjects, setTasks } = useAppStore()
+  const [route, setRoute] = useState(window.location.hash)
+
+  // Subscribe to cross-window events.
+  useWailsEvents()
 
   useEffect(() => {
     getProjects().then((projects) => setProjects(projects || []))
     getAllTasks().then((tasks) => setTasks(tasks || []))
   }, [])
 
+  // Listen to hash changes for multi-window routing.
+  useEffect(() => {
+    const onHashChange = () => setRoute(window.location.hash)
+    window.addEventListener('hashchange', onHashChange)
+    return () => window.removeEventListener('hashchange', onHashChange)
+  }, [])
+
+  // Route: quick-add window
+  if (route === '#/quick-add') {
+    return <QuickAddView />
+  }
+
+  // Route: standalone chat window
+  if (route === '#/chat') {
+    return (
+      <div className="h-screen w-screen overflow-hidden" style={{ background: 'var(--bg-primary)' }}>
+        <ChatPanel standalone />
+      </div>
+    )
+  }
+
+  // Default: main app
   return (
     <div className="flex h-screen w-screen overflow-hidden noise-bg" style={{ background: 'var(--bg-primary)' }}>
       <Sidebar />

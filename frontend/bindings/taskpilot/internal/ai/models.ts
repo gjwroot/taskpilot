@@ -6,7 +6,7 @@
 import { Create as $Create } from "@wailsio/runtime";
 
 /**
- * ClaudeClient wraps the Claude API.
+ * ClaudeClient wraps the Claude API via the official SDK.
  */
 export class ClaudeClient {
 
